@@ -2,23 +2,30 @@
 #include "rf.h"
 #include <stdio.h>
 #include "rtc2.h"
+#include "gpio.h"
+#include "si7020.h"
 
 #define printf	printf_fast_f
 
 #define DEBUG 1
-#define WATCHDOG_TIME		0xA00	// about 20 seconds. WDSV*256/32768 = wdt reset period
+#define WATCHDOG_TIME		8424   // about 66 seconds. WDSV*256/32768 = wdt reset period
 #define LED2	P0_1
 #define LED3	P0_2
 #define LED_ON	LOW
 #define LED_OFF	HIGH
 #define SW_K2	P1_6
 #define SW_K3	P1_5
+#define DHT11	P0_SB_D6
 
-uint16_t counter = 0x0D;
+uint16_t counter = 0;
 //uint8_t txaddr[] = {'J','E','N','S', 0x01}; // backwards on rpi
 uint8_t txaddr[] = {0x02, 'S', 'N', 'E', 'J'};
 
-uint8_t regbuf[2];
+uint8_t dhtbuf[5];
+uint8_t dhtretcode;
+uint8_t temp, humidity = 255;
+//uint16_t temp, humidity = 0;
+
 uint16_t adcraw;
 __idata volatile uint32_t seconds = 0;
 
@@ -81,6 +88,70 @@ void _sleep(uint8_t s)
 	} while (--s);
 }
 
+void dht11_init() 
+{
+	/*
+	gpio_pin_configure(GPIO_PIN_ID_P0_6,
+					   GPIO_PIN_CONFIG_OPTION_DIR_INPUT |
+					   GPIO_PIN_CONFIG_OPTION_PIN_MODE_INPUT_BUFFER_ON_PULL_UP_RESISTOR);	
+	*/
+	gpio_pin_dir_output(GPIO_PIN_ID_P0_6, GPIO_PIN_CONFIG_OPTION_PIN_MODE_OUTPUT_BUFFER_NORMAL_DRIVE_STRENGTH);
+	DHT11 = 1;
+	delay_ms(1000);
+}
+
+uint8_t dht11_read_byte()
+{
+	uint8_t i, val = 0;
+	//gpio_pin_dir_input(GPIO_PIN_ID_P0_6, GPIO_PIN_CONFIG_OPTION_PIN_MODE_INPUT_BUFFER_ON_PULL_UP_RESISTOR);
+	for (i=0; i < 8; i++)
+	{
+		val <<= 1;
+		while (DHT11 == 0);
+		delay_us(30);
+		if (DHT11 == 1)
+		{
+			val |= 1;
+			while (DHT11 != 0);		
+		}
+	}
+	return val;
+}
+
+uint8_t dht11_read_sensor()
+{
+	bool check;
+	uint8_t i, checksum = 0;
+	DHT11 = 1;
+	DHT11 = 0;
+	delay_ms(20);
+	DHT11 = 1;
+	delay_us(26);
+	gpio_pin_dir_input(GPIO_PIN_ID_P0_6, GPIO_PIN_CONFIG_OPTION_PIN_MODE_INPUT_BUFFER_ON_PULL_UP_RESISTOR);	
+	
+	check = DHT11;
+	if (check)
+		return 1;
+	delay_us(80);
+
+	check = DHT11;
+	if (!check)
+		return 2;
+	delay_us(80);
+
+	for (i=0; i<5; i++)
+		dhtbuf[i] = dht11_read_byte();
+	gpio_pin_dir_output(GPIO_PIN_ID_P0_6, GPIO_PIN_CONFIG_OPTION_PIN_MODE_OUTPUT_BUFFER_NORMAL_DRIVE_STRENGTH);		
+	DHT11 = 1;
+
+	for (i=0; i<4; i++)
+		checksum += dhtbuf[i];
+	if (checksum != dhtbuf[4])
+		return 3;
+	else
+		return 0;
+}	
+
 void setup()
 {
 	msg.msgtype = MSG_COUNT_VOLTS;
@@ -107,9 +178,9 @@ void setup()
 				 RF_EN_AA_ENAA_ALL,			// uint8_t en_aa
 				 RF_EN_RXADDR_DEFAULT_VAL,		// uint8_t en_rxaddr
 				 RF_SETUP_AW_5BYTES,		// uint8_t setup_aw
-				 RF_SETUP_RETR_ARD_1000 | RF_SETUP_RETR_ARC_4,		// uint8_t setup_retr
+				 RF_SETUP_RETR_ARD_1000 | RF_SETUP_RETR_ARC_5,		// uint8_t setup_retr
 				 1,							// uint8_t rf_ch
-				 RF_RF_SETUP_RF_DR_250_KBPS | RF_RF_SETUP_RF_PWR_NEG_12_DBM,		// uint8_t rf_setup
+				 RF_RF_SETUP_RF_DR_250_KBPS | RF_RF_SETUP_RF_PWR_NEG_6_DBM,		// uint8_t rf_setup
 				 txaddr,							// uint8_t * rx_addr_p0
 				 NULL,							// uint8_t * rx_addr_p1
 				 RF_RX_ADDR_P2_DEFAULT_VAL,		// uint8_t rx_addr_p2
@@ -128,16 +199,24 @@ void setup()
 
 	rf_set_as_tx();
 
-	// rtc stuff
+	// adc setup
+	adc_configure( ADC_CONFIG_OPTION_ACQ_TIME_3_US | 
+		ADC_CONFIG_OPTION_REF_SELECT_INT_1_2V | 
+		ADC_CONFIG_OPTION_RESULT_JUSTIFICATION_RIGHT |
+		ADC_CONFIG_OPTION_RESOLUTION_10_BITS );
+		
+	// rtc setup
 	pwr_clk_mgmt_clklf_configure(PWR_CLK_MGMT_CLKLF_CONFIG_OPTION_CLK_SRC_RCOSC32K);
 	rtc2_configure(RTC2_CONFIG_OPTION_ENABLE | 
 			RTC2_CONFIG_OPTION_COMPARE_MODE_0_RESET_AT_IRQ |
 			RTC2_CONFIG_OPTION_DO_NOT_CAPTURE_ON_RFIRQ,
 			0x7FFF); //rtc tick = 1 sec
-	//rtc2_run();
 	interrupt_control_rtc2_enable();
 	sti();
-	// adc setup
+
+	dht11_init();
+
+	// i2c init?
 }
 
 void loop()
@@ -147,10 +226,7 @@ void loop()
 	delay(20);
 	digitalWrite(LED2, LED_OFF);	
 
-	adc_configure( ADC_CONFIG_OPTION_ACQ_TIME_3_US | 
-		ADC_CONFIG_OPTION_REF_SELECT_INT_1_2V | 
-		ADC_CONFIG_OPTION_RESULT_JUSTIFICATION_RIGHT |
-		ADC_CONFIG_OPTION_RESOLUTION_10_BITS );
+	adc_power_up();
 	adcraw = adc_start_single_conversion_get_value(ADC_CHANNEL_1_THIRD_VDD);
 
 	msg.counter++;
@@ -169,9 +245,27 @@ void loop()
 	} else if (rf_irq_max_rt_active()) {
 		// tx retries failed
 	}
-
-	//while(!(rf_irq_pin_active() && rf_irq_tx_ds_active()));
-	//while (rf_irq_max_rt_active()); // trap retrans timeout to trigger wdt
+	
+	// DHT11
+	
+	dhtretcode = dht11_read_sensor();
+	if (dhtretcode == 0)
+	{
+		humidity = dhtbuf[0];
+		temp = dhtbuf[2];
+		printf("temp: %2d, humidity: %2d, ", temp, humidity);
+	} else
+	{
+		printf("checksum error, ");
+		printf("dhtraw: %02x %02x %02x %02x %02x, r: %d\r\n",
+			dhtbuf[0], dhtbuf[1], dhtbuf[2], dhtbuf[3], dhtbuf[4], dhtretcode);
+	}
+	
+	// si7021:
+	//printf("reading si7020... \n");
+	temp = si7020Temperature();
+	humidity = si7020Humidity();
+	printf("tempF: %2d, humidity: %2d, ", temp, humidity);
 
 	printf("t: %4ld, cnt: %4d, adcraw: %4d, voltage: %0.3f\r\n", seconds, counter, adcraw, msg.voltage);
 
@@ -179,7 +273,6 @@ void loop()
 	delay(20);
 	digitalWrite(LED3, LED_OFF);	
 	counter++;
-	//delay(21000);
 	// power save
 	_sleep(8);
 

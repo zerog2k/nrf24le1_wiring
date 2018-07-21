@@ -20,7 +20,7 @@ uint16_t si7020Humidity(){
 
 uint16_t si7020Temperature(){
 	si7020data = si7020Measurement(SI7020_TEMP);
-	return ((175.25*si7020data/65536)-46.85) * 1.8 + 32;
+	return ((175.72*si7020data/65536)-46.85) * 1.8 + 32;
 }
 
 uint16_t si7020Measurement(uint8_t command){
